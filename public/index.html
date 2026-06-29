@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Нумерация ЭДО</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div>
+        <h1>Нумерация документов ЭДО</h1>
+        <p class="subtitle">Гибкая настройка номенклатуры по подразделениям и типам документов</p>
+      </div>
+      <div class="header-actions">
+        <button id="btnPoll" class="btn btn-secondary">Запустить опрос</button>
+        <button id="btnSave" class="btn btn-primary">Сохранить настройки</button>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="processes">Смарт-процессы</button>
+      <button class="tab" data-tab="global">Общие настройки</button>
+      <button class="tab" data-tab="logs">Журнал</button>
+      <button class="tab" data-tab="counters">Счётчики</button>
+      <button class="tab" data-tab="help">Интеграция</button>
+    </nav>
+
+    <main>
+      <section id="tab-processes" class="panel active">
+        <div class="panel-toolbar">
+          <button id="btnAddProcess" class="btn btn-secondary">+ Добавить смарт-процесс</button>
+          <button id="btnLoadProcesses" class="btn btn-ghost">Загрузить из портала</button>
+          <label class="toolbar-search">
+            <span class="sr-only">Поиск отдела</span>
+            <input type="search" id="deptGlobalSearch" placeholder="Фильтр отделов в таблице…">
+          </label>
+        </div>
+        <div id="portalDataBanner" class="portal-banner" hidden></div>
+        <div id="processesList"></div>
+      </section>
+
+      <section id="tab-global" class="panel">
+        <div class="form-grid">
+          <p class="hint" style="grid-column:1/-1;margin:0 0 8px;">Поле «Структурное подразделение» заполняется автоматически по отделу сотрудника из поля «от кого». Нумерация определяется по этому полю.</p>
+          <label>
+            <input type="checkbox" id="fillDepartmentFromUser" checked> Подставлять подразделение из отдела сотрудника «от кого» (если поле пустое)
+          </label>
+          <label>
+            Поле отдела пользователя
+            <input type="text" id="userDepartmentField" placeholder="departmentId">
+            <span class="hint">Только для автоподстановки выше</span>
+          </label>
+          <label>
+            <input type="checkbox" id="pollingEnabled"> Автоматический опрос элементов без номера
+          </label>
+          <label>
+            Интервал опроса (минут)
+            <input type="number" id="pollIntervalMinutes" min="1" max="60" value="5">
+          </label>
+        </div>
+      </section>
+
+      <section id="tab-logs" class="panel">
+        <div id="logsList" class="logs"></div>
+      </section>
+
+      <section id="tab-counters" class="panel">
+        <div id="countersList" class="counters"></div>
+      </section>
+
+      <section id="tab-help" class="panel">
+        <div class="help-content">
+          <h2>Когда заполняются поля в карточке</h2>
+          <p>В настройках приложения вы только <strong>указываете, какие поля</strong> использовать. Сами значения в карточке смарт-процесса приложение записывает отдельно:</p>
+          <ol>
+            <li><strong>Создаёте записку</strong> в Bitrix24 и указываете сотрудника в поле «От кого».</li>
+            <li><strong>Срабатывает триггер</strong> — робот автоматизации (webhook) или автоматический опрос раз в несколько минут.</li>
+            <li><strong>Подразделение</strong> — приложение определяет отдел сотрудника и записывает значение в поле «Структурное подразделение».</li>
+            <li><strong>Номер</strong> — сразу после этого присваивается номер по правилу подразделения и записывается в поле «Номер документа».</li>
+          </ol>
+          <p>Без робота нумерация произойдёт при следующем опросе (по умолчанию каждые 5 мин) или по кнопке «Запустить опрос».</p>
+
+          <h2>Как заполнить таблицу подразделений</h2>
+          <ul>
+            <li><strong>Отдел Bitrix24</strong> — отдел сотрудника из структуры компании (из поля «от кого»).</li>
+            <li><strong>Название в карточке</strong> — текст для поля «Структурное подразделение», если поле текстовое.</li>
+            <li><strong>Элемент списка</strong> — если поле подразделения типа «Список», выберите тот же вариант, что в карточке Bitrix24.</li>
+            <li><strong>Тип поля подразделения</strong>: «Текст» — обычная строка; «Список» — поле с вариантами; «Привязка к отделу» — в карточку пишется ID отдела.</li>
+          </ul>
+
+          <h2>Как работает приложение</h2>
+          <ol>
+            <li>В карточке укажите сотрудника в поле «от кого».</li>
+            <li>Приложение определяет отдел сотрудника и подставляет «Структурное подразделение» по таблице настроек.</li>
+            <li>Номер присваивается по правилу выбранного подразделения (префикс, формат, счётчик).</li>
+            <li>Для каждого смарт-процесса в настройках видна вся таблица подразделений — можно добавлять и редактировать.</li>
+            <li>Настройте робота: при создании или изменении элемента → HTTP на webhook (см. ниже).</li>
+          </ol>
+
+          <h2>Webhook для роботов автоматизации</h2>
+          <pre id="webhookUrl" class="code-block"></pre>
+          <p>Тело запроса (POST, JSON):</p>
+          <pre class="code-block">{
+  "entityTypeId": 156,
+  "itemId": 783,
+  "event": "ONCRMDYNAMICITEMADD"
+}</pre>
+
+          <h2>Шаблон номера</h2>
+          <p>Доступные переменные в поле «Формат»:</p>
+          <ul>
+            <li><code>{prefix}</code> — префикс</li>
+            <li><code>{suffix}</code> — суффикс</li>
+            <li><code>{year}</code>, <code>{month}</code>, <code>{day}</code></li>
+            <li><code>{counter:4}</code> — счётчик с дополнением нулями (4 цифры)</li>
+            <li><code>{department}</code> — ключ подразделения</li>
+          </ul>
+          <p>Примеры: <code>{prefix}-{year}-{counter:4}</code> → СЗ-2026-0001</p>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
