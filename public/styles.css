@@ -205,6 +205,53 @@ input[type="checkbox"] { width: auto; }
   border-top: 1px solid var(--border);
 }
 
+.dept-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 20px 0 0;
+  padding: 12px 0;
+  border: none;
+  border-top: 1px solid var(--border);
+  background: transparent;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dept-section-toggle:hover {
+  color: var(--primary, #2563eb);
+}
+
+.dept-section-chevron {
+  display: inline-block;
+  font-size: 11px;
+  transition: transform 0.15s ease;
+  color: var(--muted);
+}
+
+.dept-section-toggle.is-collapsed .dept-section-chevron {
+  transform: rotate(-90deg);
+}
+
+.dept-section-count {
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.dept-section-body {
+  padding-top: 12px;
+}
+
+.dept-section-body.is-collapsed {
+  display: none;
+}
+
 .rule-row, .mapping-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)) auto;
@@ -310,6 +357,18 @@ input[type="checkbox"] { width: auto; }
 
 .dept-table .dept-search {
   min-width: 180px;
+}
+
+.counter-cell {
+  white-space: nowrap;
+}
+
+.counter-cell .cfg-counter-display {
+  display: inline-block;
+  min-width: 2.5rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted, #64748b);
+  margin-right: 4px;
 }
 
 .dept-config-row td:last-child {

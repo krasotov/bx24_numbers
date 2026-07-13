@@ -8,6 +8,81 @@ let portalDataError = null;
 const processFieldsCache = new Map();
 const deptSearchOptionsCache = new Map();
 let deptSearchCounter = 0;
+let countersCache = {};
+
+function getPeriodKeyClient(resetPeriod) {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  if (resetPeriod === 'year') return `${year}`;
+  if (resetPeriod === 'month') return `${year}-${month}`;
+  return 'all';
+}
+
+function unitKeyFromConfig(config) {
+  return (config.structuralUnitValue || config.structuralUnitName || config.bitrixDepartmentId || 'default').trim();
+}
+
+function counterKeyForConfig(entityTypeId, config) {
+  const rule = config.numbering || {};
+  const unitKey = unitKeyFromConfig(config);
+  const period = getPeriodKeyClient(rule.counterReset || 'year');
+  return `${entityTypeId}:${rule.id}:${unitKey}:${period}`;
+}
+
+const DEPT_COLLAPSE_STORAGE_KEY = 'edo-dept-section-collapsed';
+
+function deptSectionStorageKey(proc, idx) {
+  return proc.entityTypeId ? String(proc.entityTypeId) : `idx-${idx}`;
+}
+
+function readDeptCollapseState() {
+  try {
+    return JSON.parse(localStorage.getItem(DEPT_COLLAPSE_STORAGE_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function isDeptSectionCollapsed(proc, idx) {
+  const state = readDeptCollapseState();
+  return !!state[deptSectionStorageKey(proc, idx)];
+}
+
+function setDeptSectionCollapsed(proc, idx, collapsed) {
+  const state = readDeptCollapseState();
+  const key = deptSectionStorageKey(proc, idx);
+  if (collapsed) state[key] = true;
+  else delete state[key];
+  localStorage.setItem(DEPT_COLLAPSE_STORAGE_KEY, JSON.stringify(state));
+}
+
+function toggleDeptSection(toggleBtn) {
+  const section = toggleBtn.closest('.dept-section');
+  const card = section?.closest('.card');
+  if (!section || !card) return;
+
+  const idx = parseInt(card.dataset.idx, 10);
+  const proc = config.smartProcesses[idx];
+  const body = section.querySelector('.dept-section-body');
+  const collapsed = !body.classList.contains('is-collapsed');
+
+  body.classList.toggle('is-collapsed', collapsed);
+  toggleBtn.classList.toggle('is-collapsed', collapsed);
+  toggleBtn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  setDeptSectionCollapsed(proc, idx, collapsed);
+}
+
+function getStoredCounterDisplay(entityTypeId, config) {
+  if (!entityTypeId || !config?.numbering?.id) return '—';
+  const key = counterKeyForConfig(entityTypeId, config);
+  const stored = countersCache[key];
+  if (stored == null) {
+    const start = config.numbering.startFrom || 1;
+    return `→${start}`;
+  }
+  return `→${stored + 1}`;
+}
 
 const DEPT_FIELD_TYPES = [
   { value: 'string', label: 'Текст', hint: 'Обычное текстовое поле — в карточку записывается название подразделения' },
@@ -353,6 +428,8 @@ function renderProcesses() {
     migrateProcessForUi(proc);
     const deptType = proc.fields?.departmentFieldType
       || inferDepartmentFieldType(getDepartmentFieldMeta(proc));
+    const deptCount = proc.departmentConfigs?.length || 0;
+    const deptCollapsed = isDeptSectionCollapsed(proc, idx);
     return `
     <div class="card" data-idx="${idx}">
       <div class="card-header">
@@ -367,10 +444,18 @@ function renderProcesses() {
 
       ${renderProcessFieldsGrid(proc)}
 
-      <div class="section-title">Нумерация по подразделениям</div>
-      ${renderDepartmentTableHint(deptType)}
-      <div class="dept-table-wrap">${renderDepartmentTable(proc, proc.departmentConfigs, deptType)}</div>
-      <button class="btn btn-ghost btn-sm btn-add-dept-config">+ Добавить подразделение</button>
+      <div class="dept-section">
+        <button type="button" class="dept-section-toggle section-title ${deptCollapsed ? 'is-collapsed' : ''}" aria-expanded="${deptCollapsed ? 'false' : 'true'}">
+          <span class="dept-section-chevron" aria-hidden="true">▼</span>
+          <span>Нумерация по подразделениям</span>
+          <span class="dept-section-count">${deptCount ? `(${deptCount})` : ''}</span>
+        </button>
+        <div class="dept-section-body ${deptCollapsed ? 'is-collapsed' : ''}">
+          ${renderDepartmentTableHint(deptType)}
+          <div class="dept-table-wrap">${renderDepartmentTable(proc, proc.departmentConfigs, deptType)}</div>
+          <button class="btn btn-ghost btn-sm btn-add-dept-config">+ Добавить подразделение</button>
+        </div>
+      </div>
     </div>
   `;
   }).join('');
@@ -412,6 +497,7 @@ function migrateProcessForUi(proc) {
         format: rule.format || '{prefix}-{year}-{counter:4}',
         counterReset: rule.counterReset || 'year',
         startFrom: rule.startFrom || 1,
+        fillGaps: rule.fillGaps !== false,
         enabled: rule.enabled !== false,
       },
     });
@@ -496,6 +582,8 @@ function renderDepartmentTable(proc, configs, deptType) {
           <th>Формат</th>
           <th>Сброс</th>
           <th>С</th>
+          <th>Пропуски</th>
+          <th>Счётчик</th>
           <th>Вкл</th>
           <th></th>
         </tr>
@@ -522,6 +610,14 @@ function renderDepartmentTable(proc, configs, deptType) {
               </select>
             </td>
             <td><input type="number" class="cfg-start" value="${c.numbering?.startFrom || 1}" min="1" style="width:4rem"></td>
+            <td title="Заполнять освободившиеся номера при удалении документов">
+              <input type="checkbox" class="cfg-fill-gaps" ${c.numbering?.fillGaps !== false ? 'checked' : ''}>
+            </td>
+            <td class="counter-cell">
+              <span class="cfg-counter-display" title="Следующий номер по счётчику">${escapeHtml(getStoredCounterDisplay(proc.entityTypeId, c))}</span>
+              <button type="button" class="btn btn-ghost btn-sm btn-sync-counter" title="Синхронизировать с порталом">↻</button>
+              <button type="button" class="btn btn-ghost btn-sm btn-reset-counter" title="Сбросить счётчик">Сброс</button>
+            </td>
             <td><input type="checkbox" class="cfg-enabled" ${c.numbering?.enabled !== false ? 'checked' : ''}></td>
             <td><button type="button" class="btn btn-danger btn-sm btn-remove-dept-config">×</button></td>
           </tr>
@@ -574,6 +670,7 @@ function collectProcessFromCard(card) {
         format: row.querySelector('.cfg-format')?.value.trim() || '{prefix}-{year}-{counter:4}',
         counterReset: row.querySelector('.cfg-reset')?.value || 'year',
         startFrom: parseInt(row.querySelector('.cfg-start')?.value, 10) || 1,
+        fillGaps: row.querySelector('.cfg-fill-gaps')?.checked !== false,
         enabled: row.querySelector('.cfg-enabled')?.checked !== false,
       },
     };
@@ -715,6 +812,7 @@ function bindProcessEvents() {
           format: '{prefix}-{year}-{counter:4}',
           counterReset: 'year',
           startFrom: 1,
+          fillGaps: true,
           enabled: true,
         },
       });
@@ -734,6 +832,84 @@ function bindProcessEvents() {
       renderProcesses();
     };
   });
+
+  $$('.btn-reset-counter').forEach((btn) => {
+    btn.onclick = () => onResetCounter(btn.closest('.dept-config-row'), btn.closest('.card'));
+  });
+
+  $$('.btn-sync-counter').forEach((btn) => {
+    btn.onclick = () => onSyncCounter(btn.closest('.dept-config-row'), btn.closest('.card'));
+  });
+
+  $$('.dept-section-toggle').forEach((btn) => {
+    btn.onclick = () => toggleDeptSection(btn);
+  });
+}
+
+async function onResetCounter(row, card) {
+  const procIdx = parseInt(card.dataset.idx, 10);
+  collectProcessFromCard(card);
+  const proc = config.smartProcesses[procIdx];
+  const cIdx = parseInt(row.dataset.configIdx, 10);
+  const deptConfig = proc.departmentConfigs[cIdx];
+  if (!proc.entityTypeId || !deptConfig?.numbering?.id) {
+    return toast('Сначала сохраните смарт-процесс и правило', 'error');
+  }
+
+  const defaultStart = deptConfig.numbering.startFrom || 1;
+  const input = window.prompt(
+    `Сброс счётчика для «${deptConfig.structuralUnitName || unitKeyFromConfig(deptConfig)}».\nСледующий номер будет:`,
+    String(defaultStart),
+  );
+  if (input == null) return;
+
+  const startFrom = parseInt(input, 10);
+  if (!Number.isFinite(startFrom) || startFrom < 1) {
+    return toast('Укажите число от 1', 'error');
+  }
+
+  try {
+    const result = await api('/api/counters/reset', {
+      method: 'POST',
+      body: JSON.stringify({
+        entityTypeId: proc.entityTypeId,
+        ruleId: deptConfig.numbering.id,
+        startFrom,
+      }),
+    });
+    countersCache = await api('/api/counters');
+    renderProcesses();
+    toast(`Счётчик сброшен. Следующий номер: ${result.nextNumber}`);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function onSyncCounter(row, card) {
+  const procIdx = parseInt(card.dataset.idx, 10);
+  collectProcessFromCard(card);
+  const proc = config.smartProcesses[procIdx];
+  const cIdx = parseInt(row.dataset.configIdx, 10);
+  const deptConfig = proc.departmentConfigs[cIdx];
+  if (!proc.entityTypeId || !deptConfig?.numbering?.id) {
+    return toast('Сначала сохраните смарт-процесс и правило', 'error');
+  }
+
+  try {
+    const result = await api('/api/counters/sync', {
+      method: 'POST',
+      body: JSON.stringify({
+        entityTypeId: proc.entityTypeId,
+        ruleId: deptConfig.numbering.id,
+      }),
+    });
+    countersCache = await api('/api/counters');
+    renderProcesses();
+    const gaps = result.gaps?.length ? ` Пропуски: ${result.gaps.join(', ')}` : '';
+    toast(`Синхронизировано. Следующий: ${result.nextFormatted || result.nextWithGaps}.${gaps}`);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
 }
 
 async function loadConfig() {
@@ -741,6 +917,11 @@ async function loadConfig() {
   config.smartProcesses?.forEach((p) => migrateProcessForUi(p));
   writeGlobalSettings();
   $('#webhookUrl').textContent = `${location.origin}/api/webhook`;
+  try {
+    countersCache = await api('/api/counters');
+  } catch {
+    countersCache = {};
+  }
 }
 
 async function saveConfig() {
@@ -767,16 +948,20 @@ async function loadLogs() {
 }
 
 async function loadCounters() {
-  const counters = await api('/api/counters');
+  countersCache = await api('/api/counters');
   const container = $('#countersList');
-  const entries = Object.entries(counters);
+  const entries = Object.entries(countersCache);
   if (!entries.length) {
     container.innerHTML = '<div class="empty-state">Счётчики ещё не использовались</div>';
     return;
   }
-  container.innerHTML = entries.map(([key, val]) =>
-    `<div class="log-entry"><code>${escapeHtml(key)}</code> = ${val}</div>`,
-  ).join('');
+  container.innerHTML = `
+    <p class="hint">Сброс и синхронизация — в таблице подразделений на вкладке «Смарт-процессы». Здесь — все сохранённые значения счётчиков.</p>
+    ${entries.map(([key, val]) =>
+      `<div class="log-entry"><code>${escapeHtml(key)}</code> = ${val} <span class="hint">(следующий: ${val + 1})</span></div>`,
+    ).join('')}
+  `;
+  renderProcesses();
 }
 
 function updatePortalBanner() {

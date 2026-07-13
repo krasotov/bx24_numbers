@@ -4,10 +4,17 @@ const express = require('express');
 const path = require('path');
 const { getConfig, saveConfig, getLogs, getCounters, addLog } = require('./lib/storage');
 const { processByConfig, pollUnnumbered } = require('./lib/processor');
-const { migrateProcessConfig } = require('./lib/department-config');
+const { migrateProcessConfig, structuralKeyFromConfig } = require('./lib/department-config');
 const { normalizeFields, suggestProcessFields } = require('./lib/fields');
 const { parseWebhookPayload } = require('./lib/webhook-parse');
 const { VibeApi } = require('./lib/vibe-api');
+const {
+  resetStoredCounter,
+  syncCounterFromPortal,
+  getStoredCounter,
+  assignNextCounter,
+} = require('./lib/counter-assign');
+const { getPeriodKey } = require('./lib/numbering');
 
 function normalizeConfig(config) {
   if (!config?.smartProcesses) return config;
@@ -64,6 +71,165 @@ app.get('/api/logs', (_req, res) => {
 
 app.get('/api/counters', (_req, res) => {
   res.json({ success: true, data: getCounters() });
+});
+
+function findDeptConfig(processConfig, { ruleId, configId, unitKey }) {
+  migrateProcessConfig(processConfig);
+  return processConfig.departmentConfigs.find((c) => {
+    if (ruleId && c.numbering?.id === ruleId) return true;
+    if (configId && c.id === configId) return true;
+    if (unitKey) {
+      const key = structuralKeyFromConfig(c);
+      return key === unitKey;
+    }
+    return false;
+  });
+}
+
+app.post('/api/counters/reset', requireApiKey, (req, res) => {
+  const { entityTypeId, ruleId, configId, unitKey, startFrom } = req.body || {};
+  if (!entityTypeId || (!ruleId && !configId && !unitKey)) {
+    return res.status(400).json({ success: false, error: 'Укажите entityTypeId и ruleId (или configId / unitKey)' });
+  }
+
+  const config = getConfig();
+  const processConfig = config.smartProcesses.find(
+    (p) => String(p.entityTypeId) === String(entityTypeId),
+  );
+  if (!processConfig) {
+    return res.status(404).json({ success: false, error: `Смарт-процесс ${entityTypeId} не найден` });
+  }
+
+  const deptConfig = findDeptConfig(processConfig, { ruleId, configId, unitKey });
+  if (!deptConfig?.numbering) {
+    return res.status(404).json({ success: false, error: 'Правило нумерации не найдено' });
+  }
+
+  const unit = structuralKeyFromConfig(deptConfig);
+  const result = resetStoredCounter(entityTypeId, deptConfig.numbering, unit, startFrom);
+  addLog({
+    level: 'info',
+    action: 'counter_reset',
+    entityTypeId,
+    processTitle: processConfig.title,
+    ruleId: deptConfig.numbering.id,
+    unitKey: unit,
+    startFrom: startFrom ?? deptConfig.numbering.startFrom,
+    counterKey: result.key,
+    nextNumber: result.nextNumber,
+  });
+
+  res.json({ success: true, data: { ...result, unitKey: unit, structuralUnit: deptConfig.structuralUnitName } });
+});
+
+app.post('/api/counters/sync', requireApiKey, async (req, res) => {
+  const { entityTypeId, ruleId, configId, unitKey } = req.body || {};
+  if (!entityTypeId || (!ruleId && !configId && !unitKey)) {
+    return res.status(400).json({ success: false, error: 'Укажите entityTypeId и ruleId (или configId / unitKey)' });
+  }
+
+  const config = getConfig();
+  const processConfig = config.smartProcesses.find(
+    (p) => String(p.entityTypeId) === String(entityTypeId),
+  );
+  if (!processConfig) {
+    return res.status(404).json({ success: false, error: `Смарт-процесс ${entityTypeId} не найден` });
+  }
+
+  const deptConfig = findDeptConfig(processConfig, { ruleId, configId, unitKey });
+  if (!deptConfig?.numbering) {
+    return res.status(404).json({ success: false, error: 'Правило нумерации не найдено' });
+  }
+
+  try {
+    const api = new VibeApi(getApiKey(req), getSession(req));
+    const unit = structuralKeyFromConfig(deptConfig);
+    const structuralValue = deptConfig.structuralUnitValue || deptConfig.structuralUnitName || unit;
+    const result = await syncCounterFromPortal(api, entityTypeId, processConfig, deptConfig, structuralValue);
+    addLog({
+      level: 'info',
+      action: 'counter_sync',
+      entityTypeId,
+      processTitle: processConfig.title,
+      ruleId: deptConfig.numbering.id,
+      unitKey: unit,
+      maxUsed: result.maxUsed,
+      nextWithGaps: result.nextWithGaps,
+      gaps: result.gaps,
+    });
+    res.json({ success: true, data: { ...result, unitKey: unit } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/counters/status', requireApiKey, async (req, res) => {
+  const entityTypeId = req.query.entityTypeId;
+  const ruleId = req.query.ruleId;
+  const configId = req.query.configId;
+  const unitKey = req.query.unitKey;
+
+  if (!entityTypeId || (!ruleId && !configId && !unitKey)) {
+    return res.status(400).json({ success: false, error: 'Укажите entityTypeId и ruleId (или configId / unitKey)' });
+  }
+
+  const config = getConfig();
+  const processConfig = config.smartProcesses.find(
+    (p) => String(p.entityTypeId) === String(entityTypeId),
+  );
+  if (!processConfig) {
+    return res.status(404).json({ success: false, error: `Смарт-процесс ${entityTypeId} не найден` });
+  }
+
+  const deptConfig = findDeptConfig(processConfig, { ruleId, configId, unitKey });
+  if (!deptConfig?.numbering) {
+    return res.status(404).json({ success: false, error: 'Правило нумерации не найдено' });
+  }
+
+  const unit = structuralKeyFromConfig(deptConfig);
+  const rule = deptConfig.numbering;
+  const stored = getStoredCounter(entityTypeId, rule, unit);
+  const period = getPeriodKey(rule.counterReset || 'year');
+
+  try {
+    const api = new VibeApi(getApiKey(req), getSession(req));
+    const structuralValue = deptConfig.structuralUnitValue || deptConfig.structuralUnitName || unit;
+    const preview = await assignNextCounter(
+      api,
+      entityTypeId,
+      processConfig,
+      rule,
+      unit,
+      structuralValue,
+      { excludeItemId: null, dryRun: true },
+    );
+    res.json({
+      success: true,
+      data: {
+        counterKey: stored.key,
+        stored: stored.value,
+        nextStored: stored.value == null ? (rule.startFrom || 1) : stored.value + 1,
+        period,
+        gaps: preview.gaps,
+        nextWithGaps: preview.counter,
+        nextFormatted: preview.nextFormatted,
+        usedCount: preview.usedCounters?.length || 0,
+        fillGaps: rule.fillGaps !== false,
+      },
+    });
+  } catch (err) {
+    res.json({
+      success: true,
+      data: {
+        counterKey: stored.key,
+        stored: stored.value,
+        nextStored: stored.value == null ? (rule.startFrom || 1) : stored.value + 1,
+        period,
+        fillGaps: rule.fillGaps !== false,
+        error: err.message,
+      },
+    });
+  }
 });
 
 app.get('/api/smart-processes', requireApiKey, async (req, res) => {
