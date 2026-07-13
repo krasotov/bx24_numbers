@@ -185,43 +185,114 @@ function normalizeFields(raw) {
 }
 
 function fixLegacyFieldCode(code, fieldsByCode) {
-  if (!code || fieldsByCode[code]) return code;
-  const fixed = String(code).replace(/^ufCrm_(\d+)_/, 'ufCrm$1_');
-  return fieldsByCode[fixed] ? fixed : code;
+  if (!code) return code;
+  if (fieldsByCode[code]) return code;
+  const fixed = String(code).replace(/^ufCrm_(\d+)_/i, (_, n) => `ufCrm${n}_`);
+  if (fieldsByCode[fixed]) return fixed;
+  const lower = String(code).toLowerCase();
+  const match = Object.keys(fieldsByCode).find((k) => k.toLowerCase() === lower);
+  return match || code;
 }
 
-function suggestProcessFields(proc, fields) {
-  if (!fields?.length) return;
+function findFieldByCode(code, fields) {
+  if (!code || !fields?.length) return null;
+  const byCode = Object.fromEntries(fields.map((f) => [f.code, f]));
+  const normalized = fixLegacyFieldCode(code, byCode);
+  return byCode[normalized] || null;
+}
+
+function isValidSavedField(code, fields) {
+  if (!code) return false;
+  if (code === 'createdBy' || code === 'assignedById') return true;
+  return !!findFieldByCode(code, fields);
+}
+
+function readSelectedFieldMeta(selectEl) {
+  if (!selectEl || selectEl.tagName !== 'SELECT') return { code: selectEl?.value?.trim() || '', title: '' };
+  const opt = selectEl.selectedOptions?.[0];
+  return {
+    code: opt?.value?.trim() || '',
+    title: opt?.textContent?.trim() || '',
+  };
+}
+
+function normalizeProcessFieldCodes(proc, fields) {
+  if (!fields?.length) return proc;
   proc.fields = proc.fields || {};
   const byCode = Object.fromEntries(fields.map((f) => [f.code, f]));
 
   for (const key of ['creatorField', 'departmentField', 'numberField']) {
-    if (proc.fields[key]) proc.fields[key] = fixLegacyFieldCode(proc.fields[key], byCode);
+    if (!proc.fields[key]) continue;
+    const fixed = fixLegacyFieldCode(proc.fields[key], byCode);
+    if (byCode[fixed]) proc.fields[key] = fixed;
   }
+
+  if (proc.fields.creatorField) {
+    const meta = findFieldByCode(proc.fields.creatorField, fields);
+    if (meta && !proc.fields.creatorFieldTitle) {
+      proc.fields.creatorFieldTitle = meta.title;
+    }
+  }
+  if (proc.fields.departmentField) {
+    const meta = findFieldByCode(proc.fields.departmentField, fields);
+    if (meta && !proc.fields.departmentFieldTitle) {
+      proc.fields.departmentFieldTitle = meta.title;
+    }
+  }
+  if (proc.fields.numberField) {
+    const meta = findFieldByCode(proc.fields.numberField, fields);
+    if (meta && !proc.fields.numberFieldTitle) {
+      proc.fields.numberFieldTitle = meta.title;
+    }
+  }
+
+  if (proc.fields.departmentField && byCode[proc.fields.departmentField]) {
+    proc.fields.departmentFieldType = inferDepartmentFieldType(byCode[proc.fields.departmentField]);
+  }
+
+  return proc;
+}
+
+function suggestProcessFields(proc, fields) {
+  if (!fields?.length) return proc;
+  normalizeProcessFieldCodes(proc, fields);
+  proc.fields = proc.fields || {};
+  const byCode = Object.fromEntries(fields.map((f) => [f.code, f]));
 
   const findByLabel = (re) => fields.find((f) => re.test(`${f.title} ${f.code}`) && !f.readonly);
 
-  const fromField = findByLabel(/от кого/i);
-  if (fromField) {
-    proc.fields.creatorField = fromField.code;
-  } else if (!proc.fields.creatorField || (!byCode[proc.fields.creatorField] && proc.fields.creatorField !== 'createdBy')) {
-    const c = fields.find((f) => f.type === 'employee');
-    if (c) proc.fields.creatorField = c.code;
+  if (!isValidSavedField(proc.fields.creatorField, fields)) {
+    const fromField = findByLabel(/от кого/i);
+    if (fromField) {
+      proc.fields.creatorField = fromField.code;
+      proc.fields.creatorFieldTitle = fromField.title;
+    } else {
+      const c = fields.find((f) => f.type === 'employee');
+      if (c) {
+        proc.fields.creatorField = c.code;
+        proc.fields.creatorFieldTitle = c.title;
+      }
+    }
   }
+
   if (!proc.fields.departmentField || !byCode[proc.fields.departmentField]) {
     const c = findByLabel(/структурн.*подраздел/i);
     if (c) {
       proc.fields.departmentField = c.code;
+      proc.fields.departmentFieldTitle = c.title;
       proc.fields.departmentFieldType = inferDepartmentFieldType(c);
     }
   }
+
   if (!proc.fields.numberField || !byCode[proc.fields.numberField]) {
     const c = findByLabel(/номер документ/i);
-    if (c) proc.fields.numberField = c.code;
+    if (c) {
+      proc.fields.numberField = c.code;
+      proc.fields.numberFieldTitle = c.title;
+    }
   }
-  if (proc.fields.departmentField && byCode[proc.fields.departmentField]) {
-    proc.fields.departmentFieldType = inferDepartmentFieldType(byCode[proc.fields.departmentField]);
-  }
+
+  return proc;
 }
 
 function isUserField(f) {
@@ -293,8 +364,10 @@ function renderSmartProcessSelect(proc) {
   `;
 }
 
-function renderFieldSelect(selectedCode, className, fields, filterFn, emptyLabel) {
+function renderFieldSelect(selectedCode, className, fields, filterFn, emptyLabel, savedTitle = '') {
   const selected = selectedCode || '';
+  const byCode = Object.fromEntries(fields.map((f) => [f.code, f]));
+  const effectiveSelected = selected ? fixLegacyFieldCode(selected, byCode) : '';
   const filtered = fields.filter(filterFn);
   const options = [{ code: '', label: emptyLabel || '— не выбрано —' }];
 
@@ -302,11 +375,17 @@ function renderFieldSelect(selectedCode, className, fields, filterFn, emptyLabel
     options.push({ code: f.code, label: fieldOptionLabel(f) });
   }
 
-  if (selected && !options.some((o) => o.code === selected)) {
-    options.push({ code: selected, label: `${selected} (сохранённое)` });
+  const selectValue = effectiveSelected || selected;
+  if (selectValue && !options.some((o) => o.code === selectValue)) {
+    const meta = findFieldByCode(selectValue, fields);
+    options.push({
+      code: selectValue,
+      label: meta
+        ? fieldOptionLabel(meta)
+        : (savedTitle || `${selectValue} (сохранённое)`),
+    });
   }
 
-  // Стандартные системные поля
   const system = [
     { code: 'createdBy', label: 'createdBy — кем создан' },
     { code: 'assignedById', label: 'assignedById — ответственный' },
@@ -317,10 +396,12 @@ function renderFieldSelect(selectedCode, className, fields, filterFn, emptyLabel
     }
   }
 
+  const valueForSelect = selectValue || (className === 'proc-creatorField' ? 'createdBy' : '');
+
   return `
     <select class="${className}">
       ${options.map((o) =>
-        `<option value="${escapeHtml(o.code)}" ${o.code === selected ? 'selected' : ''}>${escapeHtml(o.label)}</option>`,
+        `<option value="${escapeHtml(o.code)}" ${o.code === valueForSelect ? 'selected' : ''}>${escapeHtml(o.label)}</option>`,
       ).join('')}
     </select>
   `;
@@ -334,7 +415,18 @@ function getProcessFields(proc) {
 function getDepartmentFieldMeta(proc) {
   const fields = getProcessFields(proc);
   const code = proc.fields?.departmentField;
-  return fields.find((f) => f.code === code) || null;
+  return findFieldByCode(code, fields);
+}
+
+function renderSavedFieldFallback(code, className, savedTitle, defaultValue = '') {
+  const value = code || defaultValue;
+  const label = savedTitle || value || '— не выбрано —';
+  return `
+    <select class="${className}">
+      <option value="${escapeHtml(value)}" selected>${escapeHtml(label)}</option>
+    </select>
+    <span class="hint">Поля ещё загружаются…</span>
+  `;
 }
 
 function renderDepartmentFieldTypeSelect(proc) {
@@ -379,8 +471,14 @@ function renderProcessFieldsGrid(proc) {
             fields,
             isUserField,
             '— выберите поле сотрудника —',
+            proc.fields?.creatorFieldTitle,
           )
-          : `<input type="text" class="proc-creatorField" value="${escapeHtml(proc.fields?.creatorField || 'createdBy')}" placeholder="ufCrm24_... или createdBy">`}
+          : renderSavedFieldFallback(
+            proc.fields?.creatorField,
+            'proc-creatorField',
+            proc.fields?.creatorFieldTitle,
+            'createdBy',
+          )}
         <span class="hint">Сотрудник «от кого». По его отделу определяется подразделение</span>
       </label>
       <label>Поле «Структурное подразделение»
@@ -391,8 +489,13 @@ function renderProcessFieldsGrid(proc) {
             fields,
             isDepartmentTargetField,
             '— выберите поле подразделения —',
+            proc.fields?.departmentFieldTitle,
           )
-          : `<input type="text" class="proc-departmentField" value="${escapeHtml(proc.fields?.departmentField || '')}" placeholder="ufCrm24_...">`}
+          : renderSavedFieldFallback(
+            proc.fields?.departmentField,
+            'proc-departmentField',
+            proc.fields?.departmentFieldTitle,
+          )}
         <span class="hint">Куда приложение запишет подразделение в карточке</span>
       </label>
       <label>Тип поля подразделения
@@ -406,8 +509,13 @@ function renderProcessFieldsGrid(proc) {
             fields,
             isNumberTargetField,
             '— выберите поле номера —',
+            proc.fields?.numberFieldTitle,
           )
-          : `<input type="text" class="proc-numberField" value="${escapeHtml(proc.fields?.numberField || '')}" placeholder="ufCrm24_...">`}
+          : renderSavedFieldFallback(
+            proc.fields?.numberField,
+            'proc-numberField',
+            proc.fields?.numberFieldTitle,
+          )}
         <span class="hint">Сюда приложение запишет номер после обработки записи</span>
       </label>
     </div>
@@ -639,10 +747,13 @@ function collectProcessFromCard(card) {
   if (portalProc?.title) proc.title = portalProc.title;
 
   proc.fields = {
-    creatorField: card.querySelector('.proc-creatorField')?.value.trim() || 'createdBy',
-    departmentField: card.querySelector('.proc-departmentField')?.value.trim() || '',
+    creatorField: readSelectedFieldMeta(card.querySelector('.proc-creatorField')).code || 'createdBy',
+    creatorFieldTitle: readSelectedFieldMeta(card.querySelector('.proc-creatorField')).title || proc.fields?.creatorFieldTitle || '',
+    departmentField: readSelectedFieldMeta(card.querySelector('.proc-departmentField')).code || '',
+    departmentFieldTitle: readSelectedFieldMeta(card.querySelector('.proc-departmentField')).title || proc.fields?.departmentFieldTitle || '',
     departmentFieldType: card.querySelector('.proc-departmentFieldType')?.value || 'string',
-    numberField: card.querySelector('.proc-numberField')?.value.trim() || '',
+    numberField: readSelectedFieldMeta(card.querySelector('.proc-numberField')).code || '',
+    numberFieldTitle: readSelectedFieldMeta(card.querySelector('.proc-numberField')).title || proc.fields?.numberFieldTitle || '',
   };
 
   proc.departmentConfigs = [...card.querySelectorAll('.dept-config-row')].map((row) => {
@@ -738,7 +849,7 @@ async function onReloadFields(card) {
   const proc = config.smartProcesses[idx];
   if (!proc.entityTypeId) return toast('Сначала выберите смарт-процесс', 'error');
   await loadProcessFields(proc.entityTypeId, true);
-  suggestProcessFields(proc, getProcessFields(proc));
+  normalizeProcessFieldCodes(proc, getProcessFields(proc));
   renderProcesses();
   toast(`Поля загружены: ${getProcessFields(proc).length}`);
 }
@@ -1002,7 +1113,7 @@ async function loadPortalData() {
     for (const proc of config.smartProcesses) {
       if (proc.entityTypeId) {
         await loadProcessFields(proc.entityTypeId);
-        suggestProcessFields(proc, getProcessFields(proc));
+        normalizeProcessFieldCodes(proc, getProcessFields(proc));
       }
     }
 
@@ -1216,15 +1327,10 @@ if (deptGlobalSearch) {
 async function bootstrap() {
   try {
     await loadConfig();
-    renderProcesses();
     await loadPortalData();
   } catch (e) {
     toast(e.message, 'error');
-    try {
-      await loadPortalData();
-    } catch {
-      renderProcesses();
-    }
+    renderProcesses();
   }
 }
 
